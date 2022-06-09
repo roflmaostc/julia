@@ -479,6 +479,7 @@ AttributeSet Attributes(LLVMContext &C, std::initializer_list<Attribute::AttrKin
 static Type *get_pjlvalue(LLVMContext &C) { return JuliaType::get_pjlvalue_ty(C); }
 
 static FunctionType *get_func_sig(LLVMContext &C) { return JuliaType::get_jlfunc_ty(C); }
+static FunctionType *get_func2_sig(LLVMContext &C) { return JuliaType::get_jlfunc2_ty(C); }
 
 static FunctionType *get_donotdelete_sig(LLVMContext &C) {
     return FunctionType::get(getVoidTy(C), true);
@@ -487,17 +488,15 @@ static FunctionType *get_donotdelete_sig(LLVMContext &C) {
 static AttributeList get_func_attrs(LLVMContext &C)
 {
     return AttributeList::get(C,
-            AttributeSet::get(C, makeArrayRef({Attribute::get(C, "thunk")})),
+            AttributeSet(),
             Attributes(C, {Attribute::NonNull}),
-            None);
+            {AttributeSet(),
+             Attributes(C, {Attribute::NoAlias, Attribute::ReadOnly, Attribute::NoCapture, Attribute::NoUndef})});
 }
 
 static AttributeList get_donotdelete_func_attrs(LLVMContext &C)
 {
-    AttributeSet FnAttrs = AttributeSet::get(C, makeArrayRef({Attribute::get(C, "thunk")}));
-    FnAttrs = FnAttrs.addAttribute(C, Attribute::InaccessibleMemOnly);
-    FnAttrs = FnAttrs.addAttribute(C, Attribute::WillReturn);
-    FnAttrs = FnAttrs.addAttribute(C, Attribute::NoUnwind);
+    AttributeSet FnAttrs = Attributes(C, {Attribute::InaccessibleMemOnly, Attribute::WillReturn, Attribute::NoUnwind});
     return AttributeList::get(C,
             FnAttrs,
             Attributes(C, {}),
@@ -509,6 +508,14 @@ static AttributeList get_attrs_noreturn(LLVMContext &C)
     return AttributeList::get(C,
                 Attributes(C, {Attribute::NoReturn}),
                 AttributeSet(),
+                None);
+}
+
+static AttributeList get_attrs_basic(LLVMContext &C)
+{
+    return AttributeList::get(C,
+                AttributeSet(),
+                Attributes(C, {Attribute::NonNull}),
                 None);
 }
 
@@ -600,7 +607,7 @@ static const auto jlsplatnew_func = new JuliaFunction{
         return FunctionType::get(T_prjlvalue,
             {T_prjlvalue, T_prjlvalue}, false);
     },
-    get_func_attrs,
+    get_attrs_basic,
 };
 static const auto jlthrow_func = new JuliaFunction{
     XSTR(jl_throw),
@@ -735,11 +742,7 @@ static const auto jlapplygeneric_func = new JuliaFunction{
 };
 static const auto jlinvoke_func = new JuliaFunction{
     XSTR(jl_invoke),
-    [](LLVMContext &C) {
-        auto T_prjlvalue = JuliaType::get_prjlvalue_ty(C);
-        return FunctionType::get(T_prjlvalue,
-                {T_prjlvalue, PointerType::get(T_prjlvalue, 0), getInt32Ty(C), T_prjlvalue}, false);
-    },
+    get_func2_sig,
     [](LLVMContext &C) { return AttributeList::get(C,
             AttributeSet(),
             Attributes(C, {Attribute::NonNull}),
@@ -1052,9 +1055,9 @@ BOX_FUNC(uint32, getInt32Ty(C), get_attrs_zext);
 BOX_FUNC(int64, getInt64Ty(C), get_attrs_sext);
 BOX_FUNC(uint64, getInt64Ty(C), get_attrs_zext);
 BOX_FUNC(char, getCharTy(C), get_attrs_zext);
-BOX_FUNC(float32, getFloatTy(C), get_func_attrs);
-BOX_FUNC(float64, getDoubleTy(C), get_func_attrs);
-BOX_FUNC(ssavalue, getSizeTy(C), get_func_attrs);
+BOX_FUNC(float32, getFloatTy(C), get_attrs_basic);
+BOX_FUNC(float64, getDoubleTy(C), get_attrs_basic);
+BOX_FUNC(ssavalue, getSizeTy(C), get_attrs_basic);
 #undef BOX_FUNC
 
 
@@ -1105,28 +1108,35 @@ static const auto pointer_from_objref_func = new JuliaFunction{
 // allow LLVM to make more aggressive optimizations on the call arguments.
 static const auto julia_call = new JuliaFunction{
     "julia.call",
-    [](LLVMContext &C) { return FunctionType::get(JuliaType::get_prjlvalue_ty(C),
+    [](LLVMContext &C) {
+        auto T_prjlvalue = JuliaType::get_prjlvalue_ty(C);
+        return FunctionType::get(T_prjlvalue,
 #ifdef JL_LLVM_OPAQUE_POINTERS
-            {PointerType::get(C, 0)},
+            {PointerType::get(C, 0),
 #else
-            {get_func_sig(C)->getPointerTo()},
+            {get_func_sig(C)->getPointerTo(),
 #endif
-            true); },
-    nullptr
+             T_prjlvalue}, // %f
+            true); }, // %args
+    get_attrs_basic,
 };
 
 // julia.call2 is like julia.call, except that %arg1 gets passed as a register
 // argument at the end of the argument list.
 static const auto julia_call2 = new JuliaFunction{
     "julia.call2",
-    [](LLVMContext &C) { return FunctionType::get(JuliaType::get_prjlvalue_ty(C),
+    [](LLVMContext &C) {
+        auto T_prjlvalue = JuliaType::get_prjlvalue_ty(C);
+        return FunctionType::get(T_prjlvalue,
 #ifdef JL_LLVM_OPAQUE_POINTERS
-            {PointerType::get(C, 0)},
+            {PointerType::get(C, 0),
 #else
-            {get_func_sig(C)->getPointerTo()},
+            {get_func2_sig(C)->getPointerTo(),
 #endif
-            true); },
-    nullptr
+             T_prjlvalue, // %arg1
+             T_prjlvalue}, // %f
+            true); }, // %args
+    get_attrs_basic,
 };
 
 static const auto jltuple_func = new JuliaFunction{XSTR(jl_f_tuple), get_func_sig, get_func_attrs};
@@ -2083,33 +2093,33 @@ orc::ThreadSafeModule jl_create_llvm_module(StringRef name, orc::ThreadSafeConte
 static void jl_init_function(Function *F)
 {
     // set any attributes that *must* be set on all functions
-#if defined(_OS_WINDOWS_) && !defined(_CPU_X86_64_)
-    // tell Win32 to realign the stack to the next 16-byte boundary
-    // upon entry to any function. This achieves compatibility
-    // with both MinGW-GCC (which assumes an 16-byte-aligned stack) and
-    // i686 Windows (which uses a 4-byte-aligned stack)
 #if JL_LLVM_VERSION >= 140000
     AttrBuilder attr(F->getContext());
 #else
     AttrBuilder attr;
 #endif
+#if defined(_OS_WINDOWS_) && !defined(_CPU_X86_64_)
+    // tell Win32 to realign the stack to the next 16-byte boundary
+    // upon entry to any function. This achieves compatibility
+    // with both MinGW-GCC (which assumes an 16-byte-aligned stack) and
+    // i686 Windows (which uses a 4-byte-aligned stack)
     attr.addStackAlignmentAttr(16);
-    F->addAttributes(AttributeList::FunctionIndex, attr);
 #endif
 #if defined(_OS_WINDOWS_) && defined(_CPU_X86_64_)
-    F->setHasUWTable(); // force NeedsWinEH
+    attr.addAttribute(Attribute::UWTable); // force NeedsWinEH
 #endif
 #ifdef JL_DISABLE_FPO
-    F->addFnAttr("frame-pointer", "all");
+    attr.addAttribute("frame-pointer", "all");
 #endif
 #if !defined(_COMPILER_ASAN_ENABLED_) && !defined(_OS_WINDOWS_)
     // ASAN won't like us accessing undefined memory causing spurious issues,
     // and Windows has platform-specific handling which causes it to mishandle
     // this annotation. Other platforms should just ignore this if they don't
     // implement it.
-    F->addFnAttr("probe-stack", "inline-asm");
-    //F->addFnAttr("stack-probe-size", 4096); // can use this to change the default
+    attr.addAttribute("probe-stack", "inline-asm");
+    //attr.addAttribute("stack-probe-size", "4096"); // can use this to change the default
 #endif
+    F->addAttributes(AttributeList::FunctionIndex, attr);
 }
 
 static std::pair<bool, bool> uses_specsig(jl_method_instance_t *lam, jl_value_t *rettype, bool prefer_specsig)
@@ -3771,21 +3781,20 @@ static CallInst *emit_jlcall(jl_codectx_t &ctx, Function *theFptr, Value *theF,
     ++EmittedJLCalls;
     Function *TheTrampoline = prepare_call(trampoline);
     // emit arguments
-    SmallVector<Value*, 3> theArgs;
-    theArgs.push_back(ctx.builder.CreateBitCast(theFptr,
-        TheTrampoline->getFunctionType()->getParamType(0)));
+    SmallVector<Value*, 4> theArgs;
+    theArgs.push_back(theFptr);
     if (theF)
         theArgs.push_back(theF);
     for (size_t i = 0; i < nargs; i++) {
         Value *arg = boxed(ctx, argv[i]);
         theArgs.push_back(arg);
     }
-    CallInst *result = ctx.builder.CreateCall(TheTrampoline->getFunctionType(),
-        TheTrampoline,
-        theArgs);
-    addRetAttr(result, Attribute::NonNull);
+    CallInst *result = ctx.builder.CreateCall(TheTrampoline, theArgs);
+    result->setAttributes(TheTrampoline->getAttributes());
+    // TODO: we could add readonly attributes in many cases to the args
     return result;
 }
+
 // Returns ctx.types().T_prjlvalue
 static CallInst *emit_jlcall(jl_codectx_t &ctx, JuliaFunction *theFptr, Value *theF,
                              const jl_cgval_t *argv, size_t nargs, JuliaFunction *trampoline)
@@ -3915,7 +3924,6 @@ static jl_cgval_t emit_call_specfun_boxed(jl_codectx_t &ctx, jl_value_t *jlretty
     auto theFptr = cast<Function>(
         jl_Module->getOrInsertFunction(specFunctionObject, ctx.types().T_jlfunc).getCallee());
     addRetAttr(theFptr, Attribute::NonNull);
-    theFptr->addFnAttr(Attribute::get(ctx.builder.getContext(), "thunk"));
     Value *ret = emit_jlcall(ctx, theFptr, nullptr, argv, nargs, julia_call);
     return update_julia_type(ctx, mark_julia_type(ctx, ret, true, jlretty), inferred_retty);
 }
@@ -4853,7 +4861,8 @@ static std::pair<Function*, Function*> get_oc_function(jl_codectx_t &ctx, jl_met
         F = Function::Create(get_func_sig(ctx.builder.getContext()),
                              Function::ExternalLinkage,
                              fname, jl_Module);
-        F->setAttributes(get_func_attrs(ctx.builder.getContext()));
+        jl_init_function(F);
+        F->setAttributes(AttributeList::get(ctx.builder.getContext(), {get_func_attrs(ctx.builder.getContext()), F->getAttributes()}));
     }
     Function *specF = NULL;
     if (!isspecsig) {
@@ -5365,7 +5374,6 @@ static Function *emit_tojlinvoke(jl_code_instance_t *codeinst, Module *M, jl_cod
             GlobalVariable::InternalLinkage,
             name, M);
     jl_init_function(f);
-    f->addFnAttr(Attribute::get(M->getContext(), "thunk"));
     //f->setAlwaysInline();
     ctx.f = f; // for jl_Module
     BasicBlock *b0 = BasicBlock::Create(ctx.builder.getContext(), "top", f);
@@ -5627,8 +5635,8 @@ static Function* gen_cfun_wrapper(
     Function *cw = Function::Create(functype,
             GlobalVariable::ExternalLinkage,
             funcName, M);
-    cw->setAttributes(attributes);
     jl_init_function(cw);
+    cw->setAttributes(AttributeList::get(M->getContext(), {attributes, cw->getAttributes()}));
 
     jl_codectx_t ctx(M->getContext(), params);
     ctx.f = cw;
@@ -5849,12 +5857,11 @@ static Function* gen_cfun_wrapper(
                 theFptr = Function::Create(ctx.types().T_jlfunc, GlobalVariable::ExternalLinkage,
                                            fname, jl_Module);
                 jl_init_function(theFptr);
+                addRetAttr(theFptr, Attribute::NonNull);
             }
             else {
                 assert(theFptr->getFunctionType() == ctx.types().T_jlfunc);
             }
-            addRetAttr(theFptr, Attribute::NonNull);
-            theFptr->addFnAttr(Attribute::get(ctx.builder.getContext(), "thunk"));
         }
         BasicBlock *b_generic, *b_jlcall, *b_after;
         Value *ret_jlcall;
@@ -5952,8 +5959,8 @@ static Function* gen_cfun_wrapper(
             funcName += "_gfthunk";
             Function *gf_thunk = Function::Create(returninfo.decl->getFunctionType(),
                     GlobalVariable::InternalLinkage, funcName, M);
-            gf_thunk->setAttributes(returninfo.decl->getAttributes());
             jl_init_function(gf_thunk);
+            gf_thunk->setAttributes(AttributeList::get(M->getContext(), {returninfo.decl->getAttributes(), gf_thunk->getAttributes()}));
             // build a  specsig -> jl_apply_generic converter thunk
             // this builds a method that calls jl_apply_generic (as a closure over a singleton function pointer),
             // but which has the signature of a specsig
@@ -6292,10 +6299,9 @@ static Function *gen_invoke_wrapper(jl_method_instance_t *lam, jl_value_t *jlret
         Module *M, jl_codegen_params_t &params)
 {
     ++GeneratedInvokeWrappers;
-    Function *w = Function::Create(JuliaType::get_jlfunc_ty(M->getContext()), GlobalVariable::ExternalLinkage, funcName, M);
-    addRetAttr(w, Attribute::NonNull);
-    w->addFnAttr(Attribute::get(M->getContext(), "thunk"));
+    Function *w = Function::Create(get_func_sig(M->getContext()), GlobalVariable::ExternalLinkage, funcName, M);
     jl_init_function(w);
+    w->setAttributes(AttributeList::get(M->getContext(), {get_func_attrs(M->getContext()), w->getAttributes()}));
     Function::arg_iterator AI = w->arg_begin();
     Value *funcArg = &*AI++;
     Value *argArray = &*AI++;
@@ -6469,26 +6475,45 @@ static jl_returninfo_t get_specsig_function(jl_codectx_t &ctx, Module *M, String
         rt = ctx.types().T_prjlvalue;
     }
 
-    AttributeList attributes; // function declaration attributes
+    SmallVector<AttributeSet, 8> attrs; // function declaration attributes
     if (props.cc == jl_returninfo_t::SRet) {
         assert(srt);
-        unsigned argno = 1;
-        Attribute sret = Attribute::getWithStructRetType(ctx.builder.getContext(), srt);
-        attributes = addAttributeAtIndex(attributes, ctx.builder.getContext(), argno, sret);
-        attributes = addAttributeAtIndex(attributes, ctx.builder.getContext(), argno, Attribute::NoAlias);
-        attributes = addAttributeAtIndex(attributes, ctx.builder.getContext(), argno, Attribute::NoCapture);
+#if JL_LLVM_VERSION >= 140000
+        AttrBuilder param(ctx.builder.getContext());
+#else
+        AttrBuilder param;
+#endif
+        param.addStructRetAttr(srt);
+        param.addAttribute(Attribute::NoAlias);
+        param.addAttribute(Attribute::NoCapture);
+        param.addAttribute(Attribute::NoUndef);
+        attrs.push_back(AttributeSet::get(ctx.builder.getContext(), param));
+        assert(fsig.size() == 1);
     }
     if (props.cc == jl_returninfo_t::Union) {
-        unsigned argno = 1;
-        attributes = addAttributeAtIndex(attributes, ctx.builder.getContext(), argno, Attribute::NoAlias);
-        attributes = addAttributeAtIndex(attributes, ctx.builder.getContext(), argno, Attribute::NoCapture);
+#if JL_LLVM_VERSION >= 140000
+        AttrBuilder param(ctx.builder.getContext());
+#else
+        AttrBuilder param;
+#endif
+        param.addAttribute(Attribute::NoAlias);
+        param.addAttribute(Attribute::NoCapture);
+        param.addAttribute(Attribute::NoUndef);
+        attrs.push_back(AttributeSet::get(ctx.builder.getContext(), param));
+        assert(fsig.size() == 1);
     }
 
     if (props.return_roots) {
+#if JL_LLVM_VERSION >= 140000
+        AttrBuilder param(ctx.builder.getContext());
+#else
+        AttrBuilder param;
+#endif
+        param.addAttribute(Attribute::NoAlias);
+        param.addAttribute(Attribute::NoCapture);
+        param.addAttribute(Attribute::NoUndef);
+        attrs.push_back(AttributeSet::get(ctx.builder.getContext(), param));
         fsig.push_back(get_returnroots_type(ctx, props.return_roots)->getPointerTo(0));
-        unsigned argno = fsig.size();
-        attributes = addAttributeAtIndex(attributes, ctx.builder.getContext(), argno, Attribute::NoAlias);
-        attributes = addAttributeAtIndex(attributes, ctx.builder.getContext(), argno, Attribute::NoCapture);
     }
 
     for (size_t i = 0; i < jl_nparams(sig); i++) {
@@ -6502,35 +6527,43 @@ static jl_returninfo_t get_specsig_function(jl_codectx_t &ctx, Module *M, String
         Type *ty = isboxed ? ctx.types().T_prjlvalue : julia_type_to_llvm(ctx, jt);
         if (type_is_ghost(ty))
             continue;
-        unsigned argno = fsig.size();
+#if JL_LLVM_VERSION >= 140000
+        AttrBuilder param(ctx.builder.getContext());
+#else
+        AttrBuilder param;
+#endif
         if (ty->isAggregateType()) { // aggregate types are passed by pointer
-            attributes = attributes.addParamAttribute(ctx.builder.getContext(), argno, Attribute::NoCapture);
-            attributes = attributes.addParamAttribute(ctx.builder.getContext(), argno, Attribute::ReadOnly);
+            param.addAttribute(Attribute::NoCapture);
+            param.addAttribute(Attribute::ReadOnly);
             ty = PointerType::get(ty, AddressSpace::Derived);
         }
         else if (isboxed && jl_is_immutable_datatype(jt)) {
-            attributes = attributes.addParamAttribute(ctx.builder.getContext(), argno, Attribute::ReadOnly);
+            param.addAttribute(Attribute::ReadOnly);
         }
         else if (jl_is_primitivetype(jt) && ty->isIntegerTy()) {
             bool issigned = jl_signed_type && jl_subtype(jt, (jl_value_t*)jl_signed_type);
             Attribute::AttrKind attr = issigned ? Attribute::SExt : Attribute::ZExt;
-            attributes = attributes.addParamAttribute(ctx.builder.getContext(), argno, attr);
+            param.addAttribute(attr);
         }
+        attrs.push_back(AttributeSet::get(ctx.builder.getContext(), param));
         fsig.push_back(ty);
     }
 
+    AttributeSet FnAttrs;
+    AttributeSet RetAttrs;
+    if (rt == ctx.types().T_prjlvalue)
+        RetAttrs = RetAttrs.addAttribute(ctx.builder.getContext(), Attribute::NonNull);
+    AttributeList attributes = AttributeList::get(ctx.builder.getContext(), FnAttrs, RetAttrs, attrs);
     FunctionType *ftype = FunctionType::get(rt, fsig, false);
     Function *f = M ? cast_or_null<Function>(M->getNamedValue(name)) : NULL;
     if (f == NULL) {
         f = Function::Create(ftype, GlobalVariable::ExternalLinkage, name, M);
-        f->setAttributes(attributes);
         jl_init_function(f);
+        f->setAttributes(AttributeList::get(M->getContext(), {attributes, f->getAttributes()}));
     }
     else {
         assert(f->getFunctionType() == ftype);
     }
-    if (rt == ctx.types().T_prjlvalue)
-        addRetAttr(f, Attribute::NonNull);
     props.decl = f;
     return props;
 }
@@ -6775,17 +6808,16 @@ static jl_llvm_functions_t
         raw_string_ostream(wrapName) << "jfptr_" << unadorned_name << "_" << globalUniqueGeneratedNames++;
         declarations.functionObject = wrapName;
         (void)gen_invoke_wrapper(lam, jlrettype, returninfo, retarg, declarations.functionObject, M, ctx.emission_context);
+        // TODO: add attributes: maybe_mark_argument_dereferenceable(Arg, argType)
+        // TODO: add attributes: dereferenceable<sizeof(void*) * nreq>
+        // TODO: (if needsparams) add attributes: dereferenceable<sizeof(void*) * length(sp)>, readonly, nocapture
     }
     else {
         f = Function::Create(needsparams ? ctx.types().T_jlfuncparams : ctx.types().T_jlfunc,
                              GlobalVariable::ExternalLinkage,
                              declarations.specFunctionObject, M);
         jl_init_function(f);
-        addRetAttr(f, Attribute::NonNull);
-        f->addFnAttr(Attribute::get(ctx.builder.getContext(), "thunk"));
-        // TODO: (if needsparams) add attributes: dereferenceable<sizeof(void*) * length(sp)>, readonly, nocapture
-        // TODO: add attributes: dereferenceable<sizeof(ft)>, readonly, nocapture - e.g. maybe_mark_argument_dereferenceable(Arg, argType);
-        // TODO: add attributes: dereferenceable<sizeof(void*) * nreq>, readonly, nocapture
+        f->setAttributes(AttributeList::get(ctx.builder.getContext(), {get_func_attrs(ctx.builder.getContext()), f->getAttributes()}));
         returninfo.decl = f;
         declarations.functionObject = needsparams ? "jl_fptr_sparam" : "jl_fptr_args";
     }
@@ -7097,8 +7129,14 @@ static jl_llvm_functions_t
 
     // step 8. move args into local variables
     Function::arg_iterator AI = f->arg_begin();
+    std::vector<AttributeSet> attrs(f->arg_size()); // function declaration attributes
 
     auto get_specsig_arg = [&](jl_value_t *argType, Type *llvmArgType, bool isboxed) {
+#if JL_LLVM_VERSION >= 140000
+        AttrBuilder param(ctx.builder.getContext());
+#else
+        AttrBuilder param;
+#endif
         jl_cgval_t theArg;
         if (type_is_ghost(llvmArgType)) { // this argument is not actually passed
             theArg = ghostValue(ctx, argType);
@@ -7108,13 +7146,15 @@ static jl_llvm_functions_t
         }
         else if (llvmArgType->isAggregateType()) {
             Argument *Arg = &*AI; ++AI;
-            maybe_mark_argument_dereferenceable(Arg, argType);
+            maybe_mark_argument_dereferenceable(param, argType);
+            attrs.at(Arg->getArgNo()) = AttributeSet::get(Arg->getContext(), param); // function declaration attributes
             theArg = mark_julia_slot(Arg, argType, NULL, ctx.tbaa().tbaa_const); // this argument is by-pointer
         }
         else {
             Argument *Arg = &*AI; ++AI;
             if (isboxed) // e.g. is-pointer
-                maybe_mark_argument_dereferenceable(Arg, argType);
+                maybe_mark_argument_dereferenceable(param, argType);
+            attrs.at(Arg->getArgNo()) = AttributeSet::get(Arg->getContext(), param); // function declaration attributes
             theArg = mark_julia_type(ctx, Arg, isboxed, argType);
             if (theArg.tbaa == ctx.tbaa().tbaa_immut)
                 theArg.tbaa = ctx.tbaa().tbaa_const;
@@ -7122,10 +7162,45 @@ static jl_llvm_functions_t
         return theArg;
     };
 
-    if (has_sret)
-        AI++; // skip sret slot
-    if (returninfo.return_roots)
-        AI++; // skip return_roots slot
+    if (has_sret) {
+#if JL_LLVM_VERSION >= 140000
+        AttrBuilder param(ctx.builder.getContext());
+#else
+        AttrBuilder param;
+#endif
+        Argument *Arg = &*AI; ++AI;
+        if (returninfo.cc == jl_returninfo_t::Union) {
+            param.addAttribute(Attribute::NonNull);
+            // The `dereferencable` below does not imply `nonnull` for non addrspace(0) pointers.
+            param.addDereferenceableAttr(returninfo.union_bytes);
+            param.addAlignmentAttr(returninfo.union_align);
+        }
+        else {
+            const DataLayout &DL = jl_Module->getDataLayout();
+            Type *RT = Arg->getParamStructRetType();
+            TypeSize sz = DL.getTypeAllocSize(RT);
+            Align al = DL.getPrefTypeAlign(RT);
+            param.addAttribute(Attribute::NonNull);
+            // The `dereferencable` below does not imply `nonnull` for non addrspace(0) pointers.
+            param.addDereferenceableAttr(sz);
+            param.addAlignmentAttr(al);
+        }
+        attrs.at(Arg->getArgNo()) = AttributeSet::get(Arg->getContext(), param); // function declaration attributes
+    }
+    if (returninfo.return_roots) {
+#if JL_LLVM_VERSION >= 140000
+        AttrBuilder param(ctx.builder.getContext());
+#else
+        AttrBuilder param;
+#endif
+        Argument *Arg = &*AI; ++AI;
+        param.addAttribute(Attribute::NonNull);
+        // The `dereferencable` below does not imply `nonnull` for non addrspace(0) pointers.
+        size_t size = returninfo.return_roots * sizeof(jl_value_t*);
+        param.addDereferenceableAttr(size);
+        param.addAlignmentAttr(Align(sizeof(jl_value_t*)));
+        attrs.at(Arg->getArgNo()) = AttributeSet::get(Arg->getContext(), param); // function declaration attributes
+    }
     for (i = 0; i < nreq; i++) {
         jl_sym_t *s = (jl_sym_t*)jl_array_ptr_ref(src->slotnames, i);
         jl_value_t *argType = (i == 0 && ctx.is_opaque_closure) ? (jl_value_t*)jl_any_type :
