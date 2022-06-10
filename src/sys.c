@@ -27,6 +27,9 @@
 #include <sys/mman.h>
 #include <dlfcn.h>
 #include <grp.h>
+
+// For `struct termios`
+#include <termios.h>
 #endif
 
 #ifndef _OS_WINDOWS_
@@ -513,6 +516,35 @@ JL_STREAM *JL_STDERR = (JL_STREAM*)STDERR_FILENO;
 JL_DLLEXPORT JL_STREAM *jl_stdin_stream(void)  { return JL_STDIN; }
 JL_DLLEXPORT JL_STREAM *jl_stdout_stream(void) { return JL_STDOUT; }
 JL_DLLEXPORT JL_STREAM *jl_stderr_stream(void) { return JL_STDERR; }
+
+// terminal workarounds
+JL_DLLEXPORT int jl_getch(void) JL_NOTSAFEPOINT
+{
+#if defined(_OS_WINDOWS_)
+    // Windows has an actual `_getch()`, use that:
+    return _getch();
+#else
+    // On all other platforms, we do the POSIX terminal manipulation dance
+    char buf = 0;
+    struct termios old = {0};
+    fflush(stdout);
+    if(tcgetattr(0, &old) < 0)
+        jl_error("tcgetattr()");
+    old.c_lflag &= ~ICANON;
+    old.c_lflag &= ~ECHO;
+    old.c_cc[VMIN] = 1;
+    old.c_cc[VTIME] = 0;
+    if(tcsetattr(0, TCSANOW, &old) < 0)
+        jl_error("tcsetattr(TCSANOW)");
+    if(read(0, &buf, 1) < 0)
+        jl_error("read()");
+    old.c_lflag |= ICANON;
+    old.c_lflag |= ECHO;
+    if(tcsetattr(0, TCSADRAIN, &old) < 0)
+        jl_error("tcsetattr(TCSADRAIN)");
+    return buf;
+#endif
+}
 
 // -- processor native alignment information --
 
