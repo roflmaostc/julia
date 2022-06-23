@@ -93,6 +93,84 @@ function _dropdims(A::AbstractArray, dims::Dims)
 end
 _dropdims(A::AbstractArray, dim::Integer) = _dropdims(A, (Int(dim),))
 
+"""
+    insertdims(A; dims)
+
+Return an array with the same data as `A`, but with singleton dimensions specified by
+`dims` inserted. 
+The dimensions of `A` and `dims` must be contiguous.
+If dimensions occur multiple times in `dims`, several singleton dimensions are inserted.
+
+The result shares the same underlying data as `A`, such that the
+result is mutable if and only if `A` is mutable, and setting elements of one
+alters the values of the other.
+
+See also: [`reshape`](@ref), [`dropdims`](@ref), [`vec`](@ref).
+
+# Examples
+```jldoctest
+julia> a = [1 2; 3 4]
+2×2 Matrix{Int64}:
+ 1  2
+ 3  4
+
+julia> b = insertdims(a, dims=(1,1))
+1×1×2×2 Array{Int64, 4}:
+[:, :, 1, 1] =
+ 5
+
+[:, :, 2, 1] =
+ 3
+
+[:, :, 1, 2] =
+ 2
+
+[:, :, 2, 2] =
+ 4
+
+julia> b = insertdims(a, dims=(1,2))
+1×2×1×2 Array{Int64, 4}:
+[:, :, 1, 1] =
+ 5  3
+
+[:, :, 1, 2] =
+ 2  4
+
+julia> b = insertdims(a, dims=(1,3))
+1×2×2×1 Array{Int64, 4}:
+[:, :, 1, 1] =
+ 1  3
+
+[:, :, 2, 1] =
+ 2  4
+
+julia> b[1,1,1,1] = 5; a
+2×2 Matrix{Int64}:
+ 5  2
+ 3  4
+```
+"""
+insertdims(A; dims) = _insertdims(A, dims)
+function _insertdims(A::AbstractArray{T, N}, dims::Tuple{Vararg{Int64, M}}) where {T, N, M}
+    maximum(dims) ≤ ndims(A)+1 || throw(ArgumentError("The largest entry in dims must be ≤ ndims(A) + 1."))
+    1 ≤ minimum(dims) || throw(ArgumentError("The smallest entry in dims must be ≥ 1."))
+    issorted(dims) || throw(ArgumentError("dims=$(dims) are not sorted"))
+
+    # n is the amount of the dims already inserted
+    ax_n = _foldoneto(((ds, n, dims), _) -> 
+                            dims != Tuple(()) && n == first(dims) ? 
+                                ((ds..., Base.OneTo(1)), n, tail(dims)) : 
+                                ((ds..., axes(A,n)), n+1, dims),
+                         ((), 1, dims), Val(ndims(A) + length(dims)))
+    # we need only the new shape and not n
+    reshape(A, ax_n[1])
+end
+_insertdims(A::AbstractArray, dim::Integer) = _insertdims(A, (Int(dim),))
+
+
+
+
+
 ## Unary operators ##
 
 """
@@ -516,113 +594,3 @@ function repeat_inner(arr, inner)
 end
 
 end#module
-
-"""
-    eachrow(A::AbstractVecOrMat)
-
-Create a generator that iterates over the first dimension of vector or matrix `A`,
-returning the rows as `AbstractVector` views.
-
-See also [`eachcol`](@ref), [`eachslice`](@ref), [`mapslices`](@ref).
-
-!!! compat "Julia 1.1"
-     This function requires at least Julia 1.1.
-
-# Example
-
-```jldoctest
-julia> a = [1 2; 3 4]
-2×2 Matrix{Int64}:
- 1  2
- 3  4
-
-julia> first(eachrow(a))
-2-element view(::Matrix{Int64}, 1, :) with eltype Int64:
- 1
- 2
-
-julia> collect(eachrow(a))
-2-element Vector{SubArray{Int64, 1, Matrix{Int64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}:
- [1, 2]
- [3, 4]
-```
-"""
-eachrow(A::AbstractVecOrMat) = (view(A, i, :) for i in axes(A, 1))
-
-
-"""
-    eachcol(A::AbstractVecOrMat)
-
-Create a generator that iterates over the second dimension of matrix `A`, returning the
-columns as `AbstractVector` views.
-
-See also [`eachrow`](@ref) and [`eachslice`](@ref).
-
-!!! compat "Julia 1.1"
-     This function requires at least Julia 1.1.
-
-# Example
-
-```jldoctest
-julia> a = [1 2; 3 4]
-2×2 Matrix{Int64}:
- 1  2
- 3  4
-
-julia> first(eachcol(a))
-2-element view(::Matrix{Int64}, :, 1) with eltype Int64:
- 1
- 3
-
-julia> collect(eachcol(a))
-2-element Vector{SubArray{Int64, 1, Matrix{Int64}, Tuple{Base.Slice{Base.OneTo{Int64}}, Int64}, true}}:
- [1, 3]
- [2, 4]
-```
-"""
-eachcol(A::AbstractVecOrMat) = (view(A, :, i) for i in axes(A, 2))
-
-"""
-    eachslice(A::AbstractArray; dims)
-
-Create a generator that iterates over dimensions `dims` of `A`, returning views that select all
-the data from the other dimensions in `A`.
-
-Only a single dimension in `dims` is currently supported. Equivalent to `(view(A,:,:,...,i,:,:
-...)) for i in axes(A, dims))`, where `i` is in position `dims`.
-
-See also [`eachrow`](@ref), [`eachcol`](@ref), [`mapslices`](@ref), and [`selectdim`](@ref).
-
-!!! compat "Julia 1.1"
-     This function requires at least Julia 1.1.
-
-# Example
-
-```jldoctest
-julia> M = [1 2 3; 4 5 6; 7 8 9]
-3×3 Matrix{Int64}:
- 1  2  3
- 4  5  6
- 7  8  9
-
-julia> first(eachslice(M, dims=1))
-3-element view(::Matrix{Int64}, 1, :) with eltype Int64:
- 1
- 2
- 3
-
-julia> collect(eachslice(M, dims=2))
-3-element Vector{SubArray{Int64, 1, Matrix{Int64}, Tuple{Base.Slice{Base.OneTo{Int64}}, Int64}, true}}:
- [1, 4, 7]
- [2, 5, 8]
- [3, 6, 9]
-```
-"""
-@inline function eachslice(A::AbstractArray; dims)
-    length(dims) == 1 || throw(ArgumentError("only single dimensions are supported"))
-    dim = first(dims)
-    dim <= ndims(A) || throw(DimensionMismatch("A doesn't have $dim dimensions"))
-    inds_before = ntuple(Returns(:), dim-1)
-    inds_after = ntuple(Returns(:), ndims(A)-dim)
-    return (view(A, inds_before..., i, inds_after...) for i in axes(A, dim))
-end
